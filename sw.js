@@ -1,4 +1,4 @@
-const CACHE_NAME = "lector-app-v3";
+const CACHE_NAME = "lector-app-v4";
 const APP_SHELL = [
   "./",
   "./index.html",

@@ -49,6 +49,11 @@
   .paper-card-meta{font-size:12px;color:var(--ink-soft);margin-top:3px;}
   .paper-del-btn{background:none;border:none;font-size:16px;padding:8px;cursor:pointer;flex-shrink:0;opacity:.55;}
   .paper-del-btn:active{opacity:1;}
+  .paper-actions{display:flex;align-items:center;gap:2px;flex-shrink:0;}
+  .paper-share-btn{background:none;border:none;font-size:16px;padding:8px;cursor:pointer;flex-shrink:0;opacity:.55;}
+  .paper-share-btn:active{opacity:1;}
+  .sync-notice{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;font-size:12.5px;color:var(--ink-soft);line-height:1.55;margin-bottom:16px;}
+  .sync-notice b{color:var(--ink);}
 
   .btn{display:block;width:100%;text-align:center;border:none;border-radius:12px;padding:15px;font-size:15px;font-weight:600;cursor:pointer;}
   .btn-primary{background:var(--brown);color:#fff;}
@@ -102,9 +107,11 @@
 
     <div class="reader-notice">Toca cualquier palabra del texto para ver su traducción, y pulsa el botón de audio si quieres escuchar cómo se pronuncia.</div>
 
+    <div class="sync-notice" id="syncNotice">📤 Para pasar un paper de la compu al celular: tócalo en <b>⤴</b> aquí abajo y elegilo enviar por correo, WhatsApp, Drive, OneDrive, etc. Después, en el celular, abrí ese archivo o usá "+ Agregar PDF" y buscalo ahí.</div>
+
     <div class="paper-list" id="paperList"></div>
 
-    <input type="file" id="pdfFileInput" accept="application/pdf" style="display:none">
+    <input type="file" id="pdfFileInput" accept="application/pdf" multiple style="display:none">
     <button class="btn btn-primary" id="addPaperBtn">+ Agregar PDF</button>
   </div>
 
@@ -232,12 +239,15 @@ async function renderLibrary(){
         '<div class="paper-card-title">'+escapeHtml(p.title)+'</div>'+
         '<div class="paper-card-meta">'+p.pageCount+' páginas · '+date+'</div>'+
       '</div>'+
-      '<button class="paper-del-btn" data-del="'+p.id+'">🗑</button>'+
+      '<div class="paper-actions">'+
+        '<button class="paper-share-btn" data-share="'+p.id+'" title="Enviar a otro dispositivo">⤴</button>'+
+        '<button class="paper-del-btn" data-del="'+p.id+'">🗑</button>'+
+      '</div>'+
     '</div>';
   }).join('');
   wrap.querySelectorAll('.paper-card').forEach(card => {
     card.addEventListener('click', (e) => {
-      if(e.target.closest('.paper-del-btn')) return;
+      if(e.target.closest('.paper-del-btn') || e.target.closest('.paper-share-btn')) return;
       openReader(card.getAttribute('data-id'));
     });
   });
@@ -250,6 +260,39 @@ async function renderLibrary(){
       }
     });
   });
+  wrap.querySelectorAll('.paper-share-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await exportPaper(btn.getAttribute('data-share'));
+    });
+  });
+}
+
+async function exportPaper(id){
+  const record = await dbGet(id);
+  if(!record) return;
+  const blob = new Blob([record.data], {type:'application/pdf'});
+  const filename = record.title.replace(/[\\/:*?"<>|]/g, '').trim() + '.pdf';
+  const file = new File([blob], filename, {type:'application/pdf'});
+
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{
+      await navigator.share({files:[file], title: record.title});
+      return;
+    }catch(err){
+      if(err && err.name === 'AbortError') return;
+      /* sharing failed for some other reason, fall back to download below */
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 document.getElementById('addPaperBtn').addEventListener('click', () => {
@@ -257,23 +300,30 @@ document.getElementById('addPaperBtn').addEventListener('click', () => {
 });
 
 document.getElementById('pdfFileInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
+  const files = Array.from(e.target.files || []);
   e.target.value = '';
-  if(!file) return;
-  if(file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')){
-    alert('Por favor elige un archivo PDF.');
-    return;
+  if(files.length === 0) return;
+  let failed = 0;
+  for(let i = 0; i < files.length; i++){
+    const file = files[i];
+    if(file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')){
+      failed++;
+      continue;
+    }
+    const rawBuffer = await file.arrayBuffer();
+    const storeCopy = rawBuffer.slice(0);
+    const id = 'p_' + Date.now() + '_' + i;
+    const title = file.name.replace(/\.pdf$/i, '');
+    try{
+      const pdf = await pdfjsLib.getDocument({data: rawBuffer}).promise;
+      await dbPut({id, title, addedAt: Date.now(), pageCount: pdf.numPages, data: storeCopy});
+    }catch(err){
+      failed++;
+    }
   }
-  const rawBuffer = await file.arrayBuffer();
-  const storeCopy = rawBuffer.slice(0);
-  const id = 'p_' + Date.now();
-  const title = file.name.replace(/\.pdf$/i, '');
-  try{
-    const pdf = await pdfjsLib.getDocument({data: rawBuffer}).promise;
-    await dbPut({id, title, addedAt: Date.now(), pageCount: pdf.numPages, data: storeCopy});
-    renderLibrary();
-  }catch(err){
-    alert('No se pudo leer ese PDF. Puede estar dañado o protegido.');
+  renderLibrary();
+  if(failed > 0){
+    alert(failed === 1 ? 'Un archivo no se pudo agregar (no es un PDF válido o está protegido).' : failed + ' archivos no se pudieron agregar (no son PDFs válidos o están protegidos).');
   }
 });
 
